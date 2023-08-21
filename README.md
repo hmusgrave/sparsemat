@@ -42,4 +42,4 @@ unit_tests.addModule("sparsemat", sparsemat_mod);
 
 ## Status
 
-The code works. I'm benchmarking any unexpected performance issues shortly.
+The code works in recent Zig versions (those including https://github.com/ziglang/zig/issues/16695). Make sure to run `zig build test` to check if your compiler is compatible. Performance is adequate (10-14 floating point operations per core per vector per weight on my particular x86_64+AVX2 architecture for a forward+error+backward pass, though not very pipelined or optimized).
