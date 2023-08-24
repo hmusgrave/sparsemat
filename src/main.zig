@@ -37,6 +37,37 @@ inline fn col_idx(mat_key: u64, row_idx: u64, sparse_col_idx: u64, max_col_idx: 
     };
 }
 
+// in: 0
+// out: 1
+// bufa: 2
+// bufb: 3
+const pingpong = struct {
+    next_round: usize = 0,
+
+    pub inline fn next(self: *@This(), is_final: bool) [2]usize {
+        const out_round = if (is_final) 1 else 2 + (self.next_round & 1);
+        const in_round = if (self.next_round == 0) 0 else 3 - (self.next_round & 1);
+        self.next_round += 1;
+        return .{ in_round, out_round };
+    }
+};
+
+test "pingpong" {
+    var data: [4]usize = undefined;
+
+    for (1..10) |n_rounds| {
+        data[0] = 0;
+        var tracker = pingpong{};
+        for (0..n_rounds) |round| {
+            const inout = tracker.next(round == n_rounds - 1);
+            const in = inout[0];
+            const out = inout[1];
+            data[out] = data[in] + 1;
+        }
+        try revEqual(data[1], n_rounds);
+    }
+}
+
 test "col_idx stable over time and accepts extremal inputs" {
     try revEqual(col_idx(0, 0, 0, 0), 0);
     try revEqual(col_idx(1, 0, 0, 0), 0);
@@ -231,11 +262,9 @@ pub fn LogSquareMat(
     return extern struct {
         mats: [n_mat]M,
 
-        pub fn rand_init(rand: std.rand.Random, mat_idx: u64) @This() {
-            var rtn: @This() = undefined;
-            rtn.set_root_idx(mat_idx);
-            rtn.fill_normal(rand);
-            return rtn;
+        pub fn rand_init(self: *@This(), rand: std.rand.Random, mat_idx: u64) void {
+            self.set_root_idx(mat_idx);
+            self.fill_normal(rand);
         }
 
         pub fn set_root_idx(self: *@This(), mat_idx: u64) void {
@@ -266,7 +295,7 @@ pub fn LogSquareMat(
             }
         }
 
-        pub fn clone(self: *const @This(), out: *@This()) void {
+        pub fn clone_to(self: *const @This(), out: *@This()) void {
             for (&self.mats, &out.mats) |*in_mat, *out_mat| {
                 for (&in_mat.data, &out_mat.data) |*in_el, *out_el|
                     out_el.* = in_el.*;
@@ -288,22 +317,47 @@ pub fn LogSquareMat(
             }
         }
 
-        pub inline fn mul_left_vec(
+        pub fn mul_left_vec(
             self: *const @This(),
             x: *const [n_dim]F,
             out: *[n_dim]F,
+            buf: *[2 * n_dim]F,
         ) void {
-            var buf: [n_dim * n_mat]F = undefined;
-            self.mul_left_vec_for_dM(x, &buf, out);
+            if (n_mat == 1) {
+                self.mats[0].mul_left_vec(x, out);
+                return;
+            }
+
+            var tracker = pingpong{};
+            const ptrs = [_]*[n_dim]F{ undefined, out, buf[0..n_dim], buf[n_dim..][0..n_dim] };
+            self.mats[0].mul_left_vec(x, ptrs[tracker.next(false)[1]]);
+
+            for (self.mats[1..], 1..n_mat) |*mat, round| {
+                const inout = tracker.next(round == n_mat - 1);
+                mat.mul_left_vec(ptrs[inout[0]], ptrs[inout[1]]);
+            }
         }
 
-        pub inline fn mul_right_vec(
+        pub fn mul_right_vec(
             self: *const @This(),
             x: *const [n_dim]F,
             out: *[n_dim]F,
+            buf: *[2 * n_dim]F,
         ) void {
-            var buf: [n_dim * n_mat]F = undefined;
-            self.mul_right_vec_for_dM(x, &buf, out);
+            if (n_mat == 1) {
+                self.mats[0].mul_right_vec(x, out);
+                return;
+            }
+
+            var tracker = pingpong{};
+            const ptrs = [_]*[n_dim]F{ undefined, out, buf[0..n_dim], buf[n_dim..][0..n_dim] };
+            self.mats[n_mat - 1].mul_right_vec(x, ptrs[tracker.next(false)[1]]);
+
+            for (1..n_mat) |round| {
+                const mat = self.mats[n_mat - round - 1];
+                const inout = tracker.next(round == n_mat - 1);
+                mat.mul_right_vec(ptrs[inout[0]], ptrs[inout[1]]);
+            }
         }
 
         pub fn mul_left_vec_for_dM(
@@ -449,7 +503,8 @@ test "LogSquareMat mul_left_vec" {
     var mat: L = get_test_mat();
     const x: [4]f32 = .{ 1, 2, 3, 4 };
     var y: [4]f32 = undefined;
-    mat.mul_left_vec(&x, &y);
+    var buf: [8]f32 = undefined;
+    mat.mul_left_vec(&x, &y, &buf);
     try revDeepEqual(y, .{ 132, 440, 63, 255 });
 }
 
@@ -514,7 +569,8 @@ test "LogSquareMat mul_right_vec" {
     var mat: L = get_test_mat();
     const x: [4]f32 = .{ 1, 2, 3, 4 };
     var y: [4]f32 = undefined;
-    mat.mul_right_vec(&x, &y);
+    var buf: [8]f32 = undefined;
+    mat.mul_right_vec(&x, &y, &buf);
     try revDeepEqual(y, .{ 159, 247, 176, 260 });
 }
 
