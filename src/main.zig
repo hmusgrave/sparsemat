@@ -524,7 +524,7 @@ pub fn LogSquareMat(
             {
                 const inout = tracker.next(false);
                 self.mats[n_mat - 1].mul_left_vec_dX(err, ptrs[inout[1]], .overwrite);
-                try self.mats[n_mat - 1].mul_left_vec_dM(err, xs[(n_mat - 1) * n_dim ..][0..n_dim], &out.mats[n_mat - 1], .overwrite);
+                try self.mats[n_mat - 1].mul_left_vec_dM(err, xs[(n_mat - 1) * n_dim ..][0..n_dim], &out.mats[n_mat - 1], strat);
             }
 
             for (1..n_mat - 1) |round| {
@@ -532,7 +532,7 @@ pub fn LogSquareMat(
                 const mat = &self.mats[i];
                 const inout = tracker.next(false);
                 mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
-                try mat.mul_left_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], &out.mats[i], .overwrite);
+                try mat.mul_left_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], &out.mats[i], strat);
             }
 
             {
@@ -561,13 +561,13 @@ pub fn LogSquareMat(
             {
                 const inout = tracker.next(false);
                 self.mats[0].mul_right_vec_dX(err, ptrs[inout[1]], .overwrite);
-                try self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out.mats[0], .overwrite);
+                try self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out.mats[0], strat);
             }
 
             for (self.mats[1 .. n_mat - 1], out.mats[1 .. n_mat - 1], 1..) |*mat, *out_mat, i| {
                 const inout = tracker.next(false);
                 mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
-                try mat.mul_right_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], out_mat, .overwrite);
+                try mat.mul_right_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], out_mat, strat);
             }
 
             {
@@ -598,7 +598,7 @@ pub fn LogSquareMat(
             {
                 const inout = tracker.next(false);
                 self.mats[n_mat - 1].mul_left_vec_dX(err, ptrs[inout[1]], .overwrite);
-                try self.mats[n_mat - 1].mul_left_vec_dM(err, xs[(n_mat - 1) * n_dim ..][0..n_dim], &out_dM.mats[n_mat - 1], .overwrite);
+                try self.mats[n_mat - 1].mul_left_vec_dM(err, xs[(n_mat - 1) * n_dim ..][0..n_dim], &out_dM.mats[n_mat - 1], strat);
             }
 
             for (1..n_mat - 1) |round| {
@@ -606,7 +606,7 @@ pub fn LogSquareMat(
                 const mat = &self.mats[i];
                 const inout = tracker.next(false);
                 mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
-                try mat.mul_left_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], &out_dM.mats[i], .overwrite);
+                try mat.mul_left_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], &out_dM.mats[i], strat);
             }
 
             {
@@ -636,13 +636,13 @@ pub fn LogSquareMat(
             {
                 const inout = tracker.next(false);
                 self.mats[0].mul_right_vec_dX(err, ptrs[inout[1]], .overwrite);
-                try self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out_dM.mats[0], .overwrite);
+                try self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out_dM.mats[0], strat);
             }
 
             for (self.mats[1 .. n_mat - 1], out_dM.mats[1 .. n_mat - 1], 1..) |*mat, *out_mat, i| {
                 const inout = tracker.next(false);
                 mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
-                mat.mul_right_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], out_mat, .overwrite);
+                mat.mul_right_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], out_mat, strat);
             }
 
             {
@@ -682,6 +682,8 @@ test "LogSquareMat mul_left_vec_dX" {
     var buf: [8]f32 = undefined;
     mat.mul_left_vec_dX(&err, &dX, &buf, .overwrite);
     try revDeepEqual(dX, .{ 159, 247, 176, 260 });
+    mat.mul_left_vec_dX(&err, &dX, &buf, .accumulate);
+    try revDeepEqual(dX, .{ 159 * 2, 247 * 2, 176 * 2, 260 * 2 });
 }
 
 test "LogSquareMat mul_left_vec_dM" {
@@ -695,7 +697,22 @@ test "LogSquareMat mul_left_vec_dM" {
 
     mat.mul_left_vec_for_dM(&x, &xs, &y);
     var buf: [8]f32 = undefined;
+
+    // check overwritten gradients are correct
     try mat.mul_left_vec_dM(&err, &xs, &grad, &buf, .overwrite);
+
+    try revDeepEqual(xs, .{ 1, 2, 3, 4, 28, 33, 40, 9 });
+    try revDeepEqual(y, .{ 132, 440, 63, 255 });
+
+    try revDeepEqual(grad.mats[0].data, .{ 53, 53, 106, 44, 48, 48, 48, 88 });
+    try revDeepEqual(grad.mats[1].data, .{ 112, 112, 132, 33, 80, 80, 27, 36 });
+
+    try revEqual(grad.mats[0].mat_idx, mat.mats[0].mat_idx);
+    try revEqual(grad.mats[1].mat_idx, mat.mats[1].mat_idx);
+
+    // check accumulated (now 2x) gradients are correct
+    try mat.mul_left_vec_dM(&err, &xs, &grad, &buf, .accumulate);
+    grad.scale_by(0.5);
 
     try revDeepEqual(xs, .{ 1, 2, 3, 4, 28, 33, 40, 9 });
     try revDeepEqual(y, .{ 132, 440, 63, 255 });
@@ -719,6 +736,8 @@ test "LogSquareMat mul_left_vec_dMdX" {
 
     mat.mul_left_vec_for_dM(&x, &xs, &y);
     var buf: [8]f32 = undefined;
+
+    // check overwritten gradients are correct
     try mat.mul_left_vec_dMdX(&err, &xs, &grad, &dX, &buf, .overwrite);
 
     try revDeepEqual(xs, .{ 1, 2, 3, 4, 28, 33, 40, 9 });
@@ -731,6 +750,21 @@ test "LogSquareMat mul_left_vec_dMdX" {
     try revEqual(grad.mats[1].mat_idx, mat.mats[1].mat_idx);
 
     try revDeepEqual(dX, .{ 159, 247, 176, 260 });
+
+    // check accumulated (now 2x) gradients are correct
+    try mat.mul_left_vec_dMdX(&err, &xs, &grad, &dX, &buf, .accumulate);
+    grad.scale_by(0.5);
+
+    try revDeepEqual(xs, .{ 1, 2, 3, 4, 28, 33, 40, 9 });
+    try revDeepEqual(y, .{ 132, 440, 63, 255 });
+
+    try revDeepEqual(grad.mats[0].data, .{ 53, 53, 106, 44, 48, 48, 48, 88 });
+    try revDeepEqual(grad.mats[1].data, .{ 112, 112, 132, 33, 80, 80, 27, 36 });
+
+    try revEqual(grad.mats[0].mat_idx, mat.mats[0].mat_idx);
+    try revEqual(grad.mats[1].mat_idx, mat.mats[1].mat_idx);
+
+    try revDeepEqual(dX, .{ 159 * 2, 247 * 2, 176 * 2, 260 * 2 });
 }
 
 test "LogSquareMat mul_right_vec" {
@@ -751,6 +785,8 @@ test "LogSquareMat mul_right_vec_dX" {
     var buf: [8]f32 = undefined;
     mat.mul_right_vec_dX(&err, &dX, &buf, .overwrite);
     try revDeepEqual(dX, .{ 132, 440, 63, 255 });
+    mat.mul_right_vec_dX(&err, &dX, &buf, .accumulate);
+    try revDeepEqual(dX, .{ 132 * 2, 440 * 2, 63 * 2, 255 * 2 });
 }
 
 test "LogSquareMat mul_right_vec_dM" {
@@ -764,7 +800,22 @@ test "LogSquareMat mul_right_vec_dM" {
 
     mat.mul_right_vec_for_dM(&x, &xs, &y);
     var buf: [8]f32 = undefined;
+
+    // check overwritten gradients are correct
     try mat.mul_right_vec_dM(&err, &xs, &grad, &buf, .overwrite);
+
+    try revDeepEqual(xs, .{ 12, 16, 22, 53, 1, 2, 3, 4 });
+    try revDeepEqual(y, .{ 159, 247, 176, 260 });
+
+    try revDeepEqual(grad.mats[0].data, .{ 53, 53, 106, 44, 48, 48, 48, 88 });
+    try revDeepEqual(grad.mats[1].data, .{ 112, 112, 132, 33, 80, 80, 27, 36 });
+
+    try revEqual(grad.mats[0].mat_idx, mat.mats[0].mat_idx);
+    try revEqual(grad.mats[1].mat_idx, mat.mats[1].mat_idx);
+
+    // check accumulated (now 2x) gradients are correct
+    try mat.mul_right_vec_dM(&err, &xs, &grad, &buf, .accumulate);
+    grad.scale_by(0.5);
 
     try revDeepEqual(xs, .{ 12, 16, 22, 53, 1, 2, 3, 4 });
     try revDeepEqual(y, .{ 159, 247, 176, 260 });
@@ -788,6 +839,8 @@ test "LogSquareMat mul_right_vec_dMdX" {
 
     mat.mul_right_vec_for_dM(&x, &xs, &y);
     var buf: [8]f32 = undefined;
+
+    // check overwritten gradients are correct
     try mat.mul_right_vec_dMdX(&err, &xs, &grad, &dX, &buf, .overwrite);
 
     try revDeepEqual(xs, .{ 12, 16, 22, 53, 1, 2, 3, 4 });
@@ -800,6 +853,23 @@ test "LogSquareMat mul_right_vec_dMdX" {
     try revEqual(grad.mats[1].mat_idx, mat.mats[1].mat_idx);
 
     try revDeepEqual(y, .{ 159, 247, 176, 260 });
+    try revDeepEqual(dX, .{ 132, 440, 63, 255 });
+
+    // check accumulated (now 2x) gradients are correct
+    try mat.mul_right_vec_dMdX(&err, &xs, &grad, &dX, &buf, .accumulate);
+    grad.scale_by(0.5);
+
+    try revDeepEqual(xs, .{ 12, 16, 22, 53, 1, 2, 3, 4 });
+    try revDeepEqual(y, .{ 159, 247, 176, 260 });
+
+    try revDeepEqual(grad.mats[0].data, .{ 53, 53, 106, 44, 48, 48, 48, 88 });
+    try revDeepEqual(grad.mats[1].data, .{ 112, 112, 132, 33, 80, 80, 27, 36 });
+
+    try revEqual(grad.mats[0].mat_idx, mat.mats[0].mat_idx);
+    try revEqual(grad.mats[1].mat_idx, mat.mats[1].mat_idx);
+
+    try revDeepEqual(y, .{ 159, 247, 176, 260 });
+    try revDeepEqual(dX, .{ 132 * 2, 440 * 2, 63 * 2, 255 * 2 });
 }
 
 test "LogSquareMat well-defined memory layout" {
