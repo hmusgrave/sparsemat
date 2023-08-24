@@ -22,8 +22,8 @@ Zig has a package manager!!! Do something like the following.
 
     .dependencies = .{
         .sparsemat = .{
-	   .url = "https://github.com/hmusgrave/sparsemat/archive/refs/tags/0.0.1.tar.gz",
-            .hash = "1220f41fec4b4a772cb8af612d6a66a8d315240b2c2d9ab6a4eff5e4af88f2e258d0",
+	   .url = "https://github.com/hmusgrave/sparsemat/archive/refs/tags/0.2.0.tar.gz",
+	   .hash = "1220f3264745576c0f46c1a60d64bc9e0aa4f12b08a4cc9771b3d1de2e2e76a42387",
         },
     },
 }
@@ -38,6 +38,56 @@ const sparsemat_pkg = b.dependency("sparsemat", .{
 const sparsemat_mod = sparsemat_pkg.module("sparsemat");
 exe.addModule("sparsemat", sparsemat_mod);
 unit_tests.addModule("sparsemat", sparsemat_mod);
+```
+
+## Examples
+
+In general you should read the code to see what works. We expose one type `LogSquareMat` which represents a product of square sparse matrices, and it has methods computing forward and gradient passes.
+
+```zig
+const std = @import("std");
+const sparsemat = @import("sparsemat");
+
+test {
+    var prng = std.rand.DefaultPrng.init(42);
+    const rand = prng.random();
+
+    const L = sparsemat.LogSquareMat(f32, 4, 2, 2);
+
+    // feel free to use an allocator and place it on the heap instead
+    var mat: L = undefined;
+
+    // fill the matrix such that its outputs have
+    // a standard normal distribution, and use the
+    // random seed 314 to define the random sparse
+    // connections inside the matrix
+    mat.rand_init(rand, 314);
+
+    // set up the problem
+    //
+    // ordinarily you'd do something like sqrt(sum(square(x-y))) to
+    // generate the derivative of some scalar error with respect to
+    // the outputs of a matrix multiplication, but that seems a bit
+    // wordy for this small example, so we'll just create some values
+    // of the right datatype
+    const err: [4]f32 = .{ 1, 2, -5, -6 };
+
+    // the gradient computation needs some scratch space, and the result
+    // dX needs a place to go
+    var buf: [8]f32 = undefined;
+    var dX: [4]f32 = undefined;
+
+    // the API takes in everything interesting as pointers, including out
+    // parameters
+    //
+    // Note that we're specifying we'll overwrite dX with the
+    // gradient, so there's no need to initialize it ahead of time
+    mat.mul_left_vec_dX(&err, &dX, &buf, .overwrite);
+
+    // this time we're accumulating (adding) the new gradient to the old
+    // value stored in dX
+    mat.mul_left_vec_dX(&err, &dX, &buf, .accumulate);
+}
 ```
 
 ## Status
