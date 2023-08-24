@@ -439,14 +439,23 @@ pub fn LogSquareMat(
             }
         }
 
-        pub inline fn mul_left_vec_dM(
+        pub fn mul_left_vec_dM(
             self: *const @This(),
             err: *const [n_dim]F,
             xs: *const [n_dim * n_mat]F,
             out: *@This(),
         ) void {
-            var buf: [n_dim]F = undefined;
-            self.mul_left_vec_dMdX(err, xs, out, &buf);
+            var err_bufs: [2][n_dim]F = .{ err.*, undefined };
+            var in_err: *[n_dim]F = &err_bufs[0];
+            var out_err: *[n_dim]F = &err_bufs[1];
+            var i: usize = self.mats.len;
+            while (i > 0) : (i -= 1) {
+                const mat = self.mats[i - 1];
+                mat.mul_left_vec_dX(in_err, out_err);
+                const head = xs[(i - 1) * n_dim ..];
+                mat.mul_left_vec_dM(in_err, head[0..n_dim], &out.mats[i - 1]);
+                std.mem.swap(*[n_dim]F, &in_err, &out_err);
+            }
         }
 
         pub inline fn mul_right_vec_dM(
@@ -455,8 +464,15 @@ pub fn LogSquareMat(
             xs: *const [n_dim * n_mat]F,
             out: *@This(),
         ) void {
-            var buf: [n_dim]F = undefined;
-            self.mul_right_vec_dMdX(err, xs, out, &buf);
+            var err_bufs: [2][n_dim]F = .{ err.*, undefined };
+            var in_err: *[n_dim]F = &err_bufs[0];
+            var out_err: *[n_dim]F = &err_bufs[1];
+            for (&self.mats, &out.mats, 0..) |*mat, *out_mat, i| {
+                mat.mul_right_vec_dX(in_err, out_err);
+                const head = xs[i * n_dim ..];
+                mat.mul_right_vec_dM(in_err, head[0..n_dim], out_mat);
+                std.mem.swap(*[n_dim]F, &in_err, &out_err);
+            }
         }
 
         pub fn mul_left_vec_dMdX(
