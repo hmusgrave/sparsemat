@@ -444,17 +444,25 @@ pub fn LogSquareMat(
             err: *const [n_dim]F,
             xs: *const [n_dim * n_mat]F,
             out: *@This(),
+            buf: *[2 * n_dim]F,
         ) void {
-            var err_bufs: [2][n_dim]F = .{ err.*, undefined };
-            var in_err: *[n_dim]F = &err_bufs[0];
-            var out_err: *[n_dim]F = &err_bufs[1];
-            var i: usize = self.mats.len;
-            while (i > 0) : (i -= 1) {
-                const mat = self.mats[i - 1];
-                mat.mul_left_vec_dX(in_err, out_err);
-                const head = xs[(i - 1) * n_dim ..];
-                mat.mul_left_vec_dM(in_err, head[0..n_dim], &out.mats[i - 1]);
-                std.mem.swap(*[n_dim]F, &in_err, &out_err);
+            if (n_mat == 1) {
+                self.mats[0].mul_left_vec_dM(err, xs[0..n_dim], &out.mats[0]);
+                return;
+            }
+
+            var tracker = pingpong{};
+            const ptrs = [_]*[n_dim]F{ undefined, undefined, buf[0..n_dim], buf[n_dim..][0..n_dim] };
+            const foo = tracker.next(false);
+            self.mats[n_mat - 1].mul_left_vec_dX(err, ptrs[foo[1]]);
+            self.mats[n_mat - 1].mul_left_vec_dM(err, xs[(n_mat - 1) * n_dim ..][0..n_dim], &out.mats[n_mat - 1]);
+
+            for (1..n_mat) |round| {
+                const i = n_mat - round - 1;
+                const mat = self.mats[i];
+                const inout = tracker.next(false);
+                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]]);
+                mat.mul_left_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], &out.mats[i]);
             }
         }
 
@@ -555,7 +563,8 @@ test "LogSquareMat mul_left_vec_dM" {
     var grad: L = undefined;
 
     mat.mul_left_vec_for_dM(&x, &xs, &y);
-    mat.mul_left_vec_dM(&err, &xs, &grad);
+    var buf: [8]f32 = undefined;
+    mat.mul_left_vec_dM(&err, &xs, &grad, &buf);
 
     try revDeepEqual(xs, .{ 1, 2, 3, 4, 28, 33, 40, 9 });
     try revDeepEqual(y, .{ 132, 440, 63, 255 });
