@@ -118,6 +118,11 @@ test "col_idx max_col_idx doesn't have off-by-one" {
     }
 }
 
+const OutParamStrategy = enum {
+    overwrite,
+    accumulate,
+};
+
 fn SparseMat(
     comptime F: type,
     comptime n_row: u64,
@@ -132,9 +137,15 @@ fn SparseMat(
             self: *const @This(),
             in: *const [n_col]F,
             out: *[n_row]F,
+            comptime strat: OutParamStrategy,
         ) void {
-            for (out) |*el|
-                el.* = 0;
+            switch (strat) {
+                .overwrite => {
+                    for (out) |*el|
+                        el.* = 0;
+                },
+                .accumulate => {},
+            }
             for (0..n_row) |i_row| {
                 for (0..n_nonzero_per_row) |i_sparse_col| {
                     const i_data = i_row * n_nonzero_per_row + i_sparse_col;
@@ -148,9 +159,15 @@ fn SparseMat(
             self: *const @This(),
             in: *const [n_row]F,
             out: *[n_col]F,
+            comptime strat: OutParamStrategy,
         ) void {
-            for (out) |*el|
-                el.* = 0;
+            switch (strat) {
+                .overwrite => {
+                    for (out) |*el|
+                        el.* = 0;
+                },
+                .accumulate => {},
+            }
             for (0..n_row) |i_row| {
                 for (0..n_nonzero_per_row) |i_sparse_col| {
                     const i_data = i_row * n_nonzero_per_row + i_sparse_col;
@@ -164,16 +181,18 @@ fn SparseMat(
             self: *const @This(),
             err: *const [n_row]F,
             out: *[n_col]F,
+            comptime strat: OutParamStrategy,
         ) void {
-            return self.mul_left_vec(err, out);
+            self.mul_left_vec(err, out, strat);
         }
 
         pub inline fn mul_left_vec_dX(
             self: *const @This(),
             err: *const [n_col]F,
             out: *[n_row]F,
+            comptime strat: OutParamStrategy,
         ) void {
-            return self.mul_right_vec(err, out);
+            self.mul_right_vec(err, out, strat);
         }
 
         pub fn mul_right_vec_dM(
@@ -181,15 +200,31 @@ fn SparseMat(
             err: *const [n_row]F,
             x: *const [n_col]F,
             out: *@This(),
-        ) void {
+            comptime strat: OutParamStrategy,
+        ) !void {
+            switch (strat) {
+                .overwrite => {
+                    out.mat_idx = self.mat_idx;
+                },
+                .accumulate => {
+                    if (out.mat_idx != self.mat_idx)
+                        return error.MismatchedStructure;
+                },
+            }
             for (0..n_row) |i_row| {
                 for (0..n_nonzero_per_row) |i_sparse_col| {
                     const i_data = i_row * n_nonzero_per_row + i_sparse_col;
                     const i_col = col_idx(self.mat_idx, i_row, i_sparse_col, n_col - 1);
-                    out.data[i_data] = x[i_col] * err[i_row];
+                    switch (strat) {
+                        .overwrite => {
+                            out.data[i_data] = x[i_col] * err[i_row];
+                        },
+                        .accumulate => {
+                            out.data[i_data] = @mulAdd(F, x[i_col], err[i_row], out.data[i_data]);
+                        },
+                    }
                 }
             }
-            out.mat_idx = self.mat_idx;
         }
 
         pub fn mul_left_vec_dM(
@@ -197,15 +232,31 @@ fn SparseMat(
             err: *const [n_col]F,
             x: *const [n_row]F,
             out: *@This(),
-        ) void {
+            comptime strat: OutParamStrategy,
+        ) !void {
+            switch (strat) {
+                .overwrite => {
+                    out.mat_idx = self.mat_idx;
+                },
+                .accumulate => {
+                    if (out.mat_idx != self.mat_idx)
+                        return error.MismatchedStructure;
+                },
+            }
             for (0..n_row) |i_row| {
                 for (0..n_nonzero_per_row) |i_sparse_col| {
                     const i_data = i_row * n_nonzero_per_row + i_sparse_col;
                     const i_col = col_idx(self.mat_idx, i_row, i_sparse_col, n_col - 1);
-                    out.data[i_data] = x[i_row] * err[i_col];
+                    switch (strat) {
+                        .overwrite => {
+                            out.data[i_data] = x[i_row] * err[i_col];
+                        },
+                        .accumulate => {
+                            out.data[i_data] = @mulAdd(F, x[i_row], err[i_col], out.data[i_data]);
+                        },
+                    }
                 }
             }
-            out.mat_idx = self.mat_idx;
         }
     };
 }
@@ -227,14 +278,14 @@ test "SparseMat compiles and has appropriately matching dimensions" {
     var x_out: [2]f32 = undefined;
     var grad_out: M = undefined;
 
-    mat.mul_right_vec(&y, &x_out);
-    mat.mul_left_vec(&x, &y_out);
+    mat.mul_right_vec(&y, &x_out, .overwrite);
+    mat.mul_left_vec(&x, &y_out, .overwrite);
 
-    mat.mul_right_vec_dX(&x, &y_out);
-    mat.mul_left_vec_dX(&y, &x_out);
+    mat.mul_right_vec_dX(&x, &y_out, .overwrite);
+    mat.mul_left_vec_dX(&y, &x_out, .overwrite);
 
-    mat.mul_right_vec_dM(&x, &y, &grad_out);
-    mat.mul_left_vec_dM(&y, &x, &grad_out);
+    try mat.mul_right_vec_dM(&x, &y, &grad_out, .overwrite);
+    try mat.mul_left_vec_dM(&y, &x, &grad_out, .overwrite);
 }
 
 test "SparseMat well-defined memory layout" {
@@ -330,11 +381,11 @@ pub fn LogSquareMat(
 
             var tracker = pingpong{};
             const ptrs = [_]*[n_dim]F{ undefined, out, buf[0..n_dim], buf[n_dim..][0..n_dim] };
-            self.mats[0].mul_left_vec(x, ptrs[tracker.next(false)[1]]);
+            self.mats[0].mul_left_vec(x, ptrs[tracker.next(false)[1]], .overwrite);
 
             for (self.mats[1..], 1..n_mat) |*mat, round| {
                 const inout = tracker.next(round == n_mat - 1);
-                mat.mul_left_vec(ptrs[inout[0]], ptrs[inout[1]]);
+                mat.mul_left_vec(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
             }
         }
 
@@ -351,12 +402,12 @@ pub fn LogSquareMat(
 
             var tracker = pingpong{};
             const ptrs = [_]*[n_dim]F{ undefined, out, buf[0..n_dim], buf[n_dim..][0..n_dim] };
-            self.mats[n_mat - 1].mul_right_vec(x, ptrs[tracker.next(false)[1]]);
+            self.mats[n_mat - 1].mul_right_vec(x, ptrs[tracker.next(false)[1]], .overwrite);
 
             for (1..n_mat) |round| {
-                const mat = self.mats[n_mat - round - 1];
+                const mat = &self.mats[n_mat - round - 1];
                 const inout = tracker.next(round == n_mat - 1);
-                mat.mul_right_vec(ptrs[inout[0]], ptrs[inout[1]]);
+                mat.mul_right_vec(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
             }
         }
 
@@ -372,9 +423,10 @@ pub fn LogSquareMat(
                 mat.mul_left_vec(
                     head[0..n_dim],
                     head[n_dim .. 2 * n_dim],
+                    .overwrite,
                 );
             }
-            self.mats[self.mats.len - 1].mul_left_vec(out_xs[(n_mat - 1) * n_dim ..], out_y);
+            self.mats[self.mats.len - 1].mul_left_vec(out_xs[(n_mat - 1) * n_dim ..], out_y, .overwrite);
         }
 
         pub fn mul_right_vec_for_dM(
@@ -386,14 +438,15 @@ pub fn LogSquareMat(
             out_xs[(n_mat - 1) * n_dim ..].* = x.*;
             var i: usize = n_mat;
             while (i > 1) : (i -= 1) {
-                const mat = self.mats[i - 1];
+                const mat = &self.mats[i - 1];
                 const head = out_xs[(i - 2) * n_dim ..];
                 mat.mul_right_vec(
                     head[n_dim .. 2 * n_dim],
                     head[0..n_dim],
+                    .overwrite,
                 );
             }
-            self.mats[0].mul_right_vec(out_xs[0..n_dim], out_y);
+            self.mats[0].mul_right_vec(out_xs[0..n_dim], out_y, .overwrite);
         }
 
         pub fn mul_left_vec_dX(
@@ -401,20 +454,27 @@ pub fn LogSquareMat(
             err: *const [n_dim]F,
             out: *[n_dim]F,
             buf: *[2 * n_dim]F,
+            comptime strat: OutParamStrategy,
         ) void {
             if (n_mat == 1) {
-                self.mats[0].mul_left_vec_dX(err, out);
+                self.mats[0].mul_left_vec_dX(err, out, strat);
                 return;
             }
 
             var tracker = pingpong{};
             const ptrs = [_]*[n_dim]F{ undefined, out, buf[0..n_dim], buf[n_dim..][0..n_dim] };
-            self.mats[n_mat - 1].mul_left_vec_dX(err, ptrs[tracker.next(false)[1]]);
+            self.mats[n_mat - 1].mul_left_vec_dX(err, ptrs[tracker.next(false)[1]], .overwrite);
 
-            for (1..n_mat) |round| {
-                const mat = self.mats[n_mat - round - 1];
-                const inout = tracker.next(round == n_mat - 1);
-                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]]);
+            for (1..n_mat - 1) |round| {
+                const mat = &self.mats[n_mat - round - 1];
+                const inout = tracker.next(false);
+                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
+            }
+
+            {
+                const mat = &self.mats[n_mat - (n_mat - 1) - 1];
+                const inout = tracker.next(true);
+                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]], strat);
             }
         }
 
@@ -423,19 +483,26 @@ pub fn LogSquareMat(
             err: *const [n_dim]F,
             out: *[n_dim]F,
             buf: *[2 * n_dim]F,
+            comptime strat: OutParamStrategy,
         ) void {
             if (n_mat == 1) {
-                self.mats[0].mul_right_vec_dX(err, out);
+                self.mats[0].mul_right_vec_dX(err, out, strat);
                 return;
             }
 
             var tracker = pingpong{};
             const ptrs = [_]*[n_dim]F{ undefined, out, buf[0..n_dim], buf[n_dim..][0..n_dim] };
-            self.mats[0].mul_right_vec_dX(err, ptrs[tracker.next(false)[1]]);
+            self.mats[0].mul_right_vec_dX(err, ptrs[tracker.next(false)[1]], .overwrite);
 
-            for (self.mats[1..], 1..) |*mat, round| {
-                const inout = tracker.next(round == n_mat - 1);
-                mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]]);
+            for (self.mats[1 .. n_mat - 1]) |*mat| {
+                const inout = tracker.next(false);
+                mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
+            }
+
+            {
+                const inout = tracker.next(true);
+                const mat = &self.mats[n_mat - 1];
+                mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]], strat);
             }
         }
 
@@ -445,9 +512,10 @@ pub fn LogSquareMat(
             xs: *const [n_dim * n_mat]F,
             out: *@This(),
             buf: *[2 * n_dim]F,
-        ) void {
+            comptime strat: OutParamStrategy,
+        ) !void {
             if (n_mat == 1) {
-                self.mats[0].mul_left_vec_dM(err, xs[0..n_dim], &out.mats[0]);
+                self.mats[0].mul_left_vec_dM(err, xs[0..n_dim], &out.mats[0], strat);
                 return;
             }
 
@@ -455,16 +523,23 @@ pub fn LogSquareMat(
             const ptrs = [_]*[n_dim]F{ undefined, undefined, buf[0..n_dim], buf[n_dim..][0..n_dim] };
             {
                 const inout = tracker.next(false);
-                self.mats[n_mat - 1].mul_left_vec_dX(err, ptrs[inout[1]]);
-                self.mats[n_mat - 1].mul_left_vec_dM(err, xs[(n_mat - 1) * n_dim ..][0..n_dim], &out.mats[n_mat - 1]);
+                self.mats[n_mat - 1].mul_left_vec_dX(err, ptrs[inout[1]], .overwrite);
+                try self.mats[n_mat - 1].mul_left_vec_dM(err, xs[(n_mat - 1) * n_dim ..][0..n_dim], &out.mats[n_mat - 1], .overwrite);
             }
 
-            for (1..n_mat) |round| {
+            for (1..n_mat - 1) |round| {
                 const i = n_mat - round - 1;
-                const mat = self.mats[i];
+                const mat = &self.mats[i];
                 const inout = tracker.next(false);
-                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]]);
-                mat.mul_left_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], &out.mats[i]);
+                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
+                try mat.mul_left_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], &out.mats[i], .overwrite);
+            }
+
+            {
+                const mat = &self.mats[0];
+                const inout = tracker.next(false);
+                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
+                try mat.mul_left_vec_dM(ptrs[inout[0]], xs[0..n_dim], &out.mats[0], strat);
             }
         }
 
@@ -474,9 +549,10 @@ pub fn LogSquareMat(
             xs: *const [n_dim * n_mat]F,
             out: *@This(),
             buf: *[2 * n_dim]F,
-        ) void {
+            comptime strat: OutParamStrategy,
+        ) !void {
             if (n_mat == 1) {
-                self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out.mats[0]);
+                self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out.mats[0], strat);
                 return;
             }
 
@@ -484,14 +560,22 @@ pub fn LogSquareMat(
             const ptrs = [_]*[n_dim]F{ undefined, undefined, buf[0..n_dim], buf[n_dim..][0..n_dim] };
             {
                 const inout = tracker.next(false);
-                self.mats[0].mul_right_vec_dX(err, ptrs[inout[1]]);
-                self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out.mats[0]);
+                self.mats[0].mul_right_vec_dX(err, ptrs[inout[1]], .overwrite);
+                try self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out.mats[0], .overwrite);
             }
 
-            for (self.mats[1..], out.mats[1..], 1..n_mat) |*mat, *out_mat, i| {
+            for (self.mats[1 .. n_mat - 1], out.mats[1 .. n_mat - 1], 1..) |*mat, *out_mat, i| {
                 const inout = tracker.next(false);
-                mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]]);
-                mat.mul_right_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], out_mat);
+                mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
+                try mat.mul_right_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], out_mat, .overwrite);
+            }
+
+            {
+                const mat = &self.mats[n_mat - 1];
+                var out_mat = &out.mats[n_mat - 1];
+                const inout = tracker.next(false);
+                mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
+                try mat.mul_right_vec_dM(ptrs[inout[0]], xs[(n_mat - 1) * n_dim ..][0..n_dim], out_mat, strat);
             }
         }
 
@@ -502,9 +586,10 @@ pub fn LogSquareMat(
             out_dM: *@This(),
             out_dX: *[n_dim]F,
             buf: *[2 * n_dim]F,
-        ) void {
+            comptime strat: OutParamStrategy,
+        ) !void {
             if (n_mat == 1) {
-                self.mats[0].mul_left_vec_dM(err, xs[0..n_dim], &out_dM.mats[0]);
+                self.mats[0].mul_left_vec_dM(err, xs[0..n_dim], &out_dM.mats[0], strat);
                 return;
             }
 
@@ -512,16 +597,23 @@ pub fn LogSquareMat(
             const ptrs = [_]*[n_dim]F{ undefined, out_dX, buf[0..n_dim], buf[n_dim..][0..n_dim] };
             {
                 const inout = tracker.next(false);
-                self.mats[n_mat - 1].mul_left_vec_dX(err, ptrs[inout[1]]);
-                self.mats[n_mat - 1].mul_left_vec_dM(err, xs[(n_mat - 1) * n_dim ..][0..n_dim], &out_dM.mats[n_mat - 1]);
+                self.mats[n_mat - 1].mul_left_vec_dX(err, ptrs[inout[1]], .overwrite);
+                try self.mats[n_mat - 1].mul_left_vec_dM(err, xs[(n_mat - 1) * n_dim ..][0..n_dim], &out_dM.mats[n_mat - 1], .overwrite);
             }
 
-            for (1..n_mat) |round| {
+            for (1..n_mat - 1) |round| {
                 const i = n_mat - round - 1;
-                const mat = self.mats[i];
-                const inout = tracker.next(round == n_mat - 1);
-                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]]);
-                mat.mul_left_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], &out_dM.mats[i]);
+                const mat = &self.mats[i];
+                const inout = tracker.next(false);
+                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
+                try mat.mul_left_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], &out_dM.mats[i], .overwrite);
+            }
+
+            {
+                const mat = &self.mats[0];
+                const inout = tracker.next(true);
+                mat.mul_left_vec_dX(ptrs[inout[0]], ptrs[inout[1]], strat);
+                try mat.mul_left_vec_dM(ptrs[inout[0]], xs[0..n_dim], &out_dM.mats[0], strat);
             }
         }
 
@@ -532,9 +624,10 @@ pub fn LogSquareMat(
             out_dM: *@This(),
             out_dX: *[n_dim]F,
             buf: *[2 * n_dim]F,
-        ) void {
+            comptime strat: OutParamStrategy,
+        ) !void {
             if (n_mat == 1) {
-                self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out_dM.mats[0]);
+                try self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out_dM.mats[0], strat);
                 return;
             }
 
@@ -542,14 +635,22 @@ pub fn LogSquareMat(
             const ptrs = [_]*[n_dim]F{ undefined, out_dX, buf[0..n_dim], buf[n_dim..][0..n_dim] };
             {
                 const inout = tracker.next(false);
-                self.mats[0].mul_right_vec_dX(err, ptrs[inout[1]]);
-                self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out_dM.mats[0]);
+                self.mats[0].mul_right_vec_dX(err, ptrs[inout[1]], .overwrite);
+                try self.mats[0].mul_right_vec_dM(err, xs[0..n_dim], &out_dM.mats[0], .overwrite);
             }
 
-            for (self.mats[1..], out_dM.mats[1..], 1..n_mat) |*mat, *out_mat, i| {
-                const inout = tracker.next(i == n_mat - 1);
-                mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]]);
-                mat.mul_right_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], out_mat);
+            for (self.mats[1 .. n_mat - 1], out_dM.mats[1 .. n_mat - 1], 1..) |*mat, *out_mat, i| {
+                const inout = tracker.next(false);
+                mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]], .overwrite);
+                mat.mul_right_vec_dM(ptrs[inout[0]], xs[i * n_dim ..][0..n_dim], out_mat, .overwrite);
+            }
+
+            {
+                const mat = &self.mats[n_mat - 1];
+                var out_mat = &out_dM.mats[n_mat - 1];
+                const inout = tracker.next(true);
+                mat.mul_right_vec_dX(ptrs[inout[0]], ptrs[inout[1]], strat);
+                try mat.mul_right_vec_dM(ptrs[inout[0]], xs[(n_mat - 1) * n_dim ..][0..n_dim], out_mat, strat);
             }
         }
     };
@@ -579,7 +680,7 @@ test "LogSquareMat mul_left_vec_dX" {
     const err: [4]f32 = .{ 1, 2, 3, 4 };
     var dX: [4]f32 = undefined;
     var buf: [8]f32 = undefined;
-    mat.mul_left_vec_dX(&err, &dX, &buf);
+    mat.mul_left_vec_dX(&err, &dX, &buf, .overwrite);
     try revDeepEqual(dX, .{ 159, 247, 176, 260 });
 }
 
@@ -594,7 +695,7 @@ test "LogSquareMat mul_left_vec_dM" {
 
     mat.mul_left_vec_for_dM(&x, &xs, &y);
     var buf: [8]f32 = undefined;
-    mat.mul_left_vec_dM(&err, &xs, &grad, &buf);
+    try mat.mul_left_vec_dM(&err, &xs, &grad, &buf, .overwrite);
 
     try revDeepEqual(xs, .{ 1, 2, 3, 4, 28, 33, 40, 9 });
     try revDeepEqual(y, .{ 132, 440, 63, 255 });
@@ -618,7 +719,7 @@ test "LogSquareMat mul_left_vec_dMdX" {
 
     mat.mul_left_vec_for_dM(&x, &xs, &y);
     var buf: [8]f32 = undefined;
-    mat.mul_left_vec_dMdX(&err, &xs, &grad, &dX, &buf);
+    try mat.mul_left_vec_dMdX(&err, &xs, &grad, &dX, &buf, .overwrite);
 
     try revDeepEqual(xs, .{ 1, 2, 3, 4, 28, 33, 40, 9 });
     try revDeepEqual(y, .{ 132, 440, 63, 255 });
@@ -648,7 +749,7 @@ test "LogSquareMat mul_right_vec_dX" {
     const err: [4]f32 = .{ 1, 2, 3, 4 };
     var dX: [4]f32 = undefined;
     var buf: [8]f32 = undefined;
-    mat.mul_right_vec_dX(&err, &dX, &buf);
+    mat.mul_right_vec_dX(&err, &dX, &buf, .overwrite);
     try revDeepEqual(dX, .{ 132, 440, 63, 255 });
 }
 
@@ -663,7 +764,7 @@ test "LogSquareMat mul_right_vec_dM" {
 
     mat.mul_right_vec_for_dM(&x, &xs, &y);
     var buf: [8]f32 = undefined;
-    mat.mul_right_vec_dM(&err, &xs, &grad, &buf);
+    try mat.mul_right_vec_dM(&err, &xs, &grad, &buf, .overwrite);
 
     try revDeepEqual(xs, .{ 12, 16, 22, 53, 1, 2, 3, 4 });
     try revDeepEqual(y, .{ 159, 247, 176, 260 });
@@ -687,7 +788,7 @@ test "LogSquareMat mul_right_vec_dMdX" {
 
     mat.mul_right_vec_for_dM(&x, &xs, &y);
     var buf: [8]f32 = undefined;
-    mat.mul_right_vec_dMdX(&err, &xs, &grad, &dX, &buf);
+    try mat.mul_right_vec_dMdX(&err, &xs, &grad, &dX, &buf, .overwrite);
 
     try revDeepEqual(xs, .{ 12, 16, 22, 53, 1, 2, 3, 4 });
     try revDeepEqual(y, .{ 159, 247, 176, 260 });
